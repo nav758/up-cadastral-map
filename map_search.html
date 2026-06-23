@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UP Cadastral Search Map</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@9.1.0/ol.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body, #map { width: 100%; height: 100%; }
+        #search-panel {
+            position: absolute;
+            top: 10px; left: 10px;
+            background: rgba(255,255,255,0.97);
+            padding: 14px 16px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            font-family: system-ui, sans-serif;
+            font-size: 13px;
+            z-index: 1000;
+            width: 300px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        #search-panel h3 { margin: 0 0 10px; font-size: 15px; color: #1a202c; }
+        .field { margin-bottom: 10px; }
+        .field label { display: block; font-weight: 600; margin-bottom: 4px; color: #4a5568; font-size: 12px; }
+        .field input {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+            font-size: 13px;
+            transition: border-color .2s, box-shadow .2s;
+        }
+        .field input:focus {
+            outline: none;
+            border-color: #3182ce;
+            box-shadow: 0 0 0 3px rgba(49,130,206,0.15);
+        }
+        .buttons { display: flex; gap: 8px; margin-top: 12px; }
+        .buttons button {
+            flex: 1;
+            padding: 8px;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        #btn-search { background: #3182ce; color: #fff; }
+        #btn-clear { background: #e2e8f0; color: #2d3748; }
+        #status { margin-top: 8px; font-size: 11px; color: #4a5568; min-height: 32px; line-height: 1.4; }
+        #click-info {
+            position: absolute;
+            bottom: 10px; right: 10px;
+            background: rgba(255,255,255,0.97);
+            padding: 10px 14px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            font-family: system-ui, sans-serif;
+            font-size: 12px;
+            z-index: 1000;
+            display: none;
+            max-width: 320px;
+        }
+        .note {
+            margin-top: 8px;
+            padding: 8px;
+            background: #f7fafc;
+            border-left: 3px solid #3182ce;
+            border-radius: 0 4px 4px 0;
+            font-size: 11px;
+            color: #4a5568;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+    <div id="search-panel">
+        <h3>🔍 Search Cadastral Plot</h3>
+
+        <div class="field">
+            <label>District</label>
+            <input type="text" id="district" placeholder="e.g. Agra" value="">
+        </div>
+        <div class="field">
+            <label>Tehsil</label>
+            <input type="text" id="tehsil" placeholder="e.g. Etmadpur" value="">
+        </div>
+        <div class="field">
+            <label>Village</label>
+            <input type="text" id="village" placeholder="e.g. Akbarpur" value="">
+        </div>
+        <div class="field">
+            <label>Plot No. / Khasra No.</label>
+            <input type="text" id="plot-input" placeholder="e.g. 123 or 45A" value="">
+        </div>
+
+        <div class="buttons">
+            <button id="btn-search">Search</button>
+            <button id="btn-clear">Clear</button>
+        </div>
+
+        <div id="status"></div>
+
+        <div class="note">
+            <strong>How it works:</strong> First zooms to the district via OpenStreetMap. Then <em>scans the loaded BhuNaksha tiles</em> to find the exact village and plot inside the cadastral data.
+        </div>
+    </div>
+
+    <div id="map"></div>
+    <div id="click-info"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/ol@9.1.0/dist/ol.js"></script>
+    <script>
+        // ─── Map ──────────────────────────────────────────────────
+        const cadastralSource = new ol.source.VectorTile({
+            format: new ol.format.MVT(),
+            url: 'https://indianopenmaps.com/not-so-open/cadastrals/uttar-pradesh/ncog/{z}/{x}/{y}.pbf',
+            attributions: '© NCOG / indianopenmaps.com'
+        });
+
+        const cadastralLayer = new ol.layer.VectorTile({
+            source: cadastralSource,
+            style: new ol.style.Style({
+                fill: new ol.style.Fill({ color: 'rgba(66, 153, 225, 0.15)' }),
+                stroke: new ol.style.Stroke({ color: '#2b6cb0', width: 1.2 })
+            })
+        });
+
+        const osmLayer = new ol.layer.Tile({
+            source: new ol.source.OSM(),
+            opacity: 0.4
+        });
+
+        const highlightSource = new ol.source.Vector({});
+        const highlightLayer = new ol.layer.Vector({
+            source: highlightSource,
+            style: new ol.style.Style({
+                fill: new ol.style.Fill({ color: 'rgba(255, 99, 71, 0.45)' }),
+                stroke: new ol.style.Stroke({ color: '#c53030', width: 2.5 })
+            })
+        });
+
+        const map = new ol.Map({
+            target: 'map',
+            layers: [osmLayer, cadastralLayer, highlightLayer],
+            view: new ol.View({
+                center: ol.proj.fromLonLat([80.9462, 26.8467]),
+                zoom: 10
+            })
+        });
+
+        // ─── DOM refs ─────────────────────────────────────────────
+        const elDistrict = document.getElementById('district');
+        const elTehsil = document.getElementById('tehsil');
+        const elVillage = document.getElementById('village');
+        const elPlot = document.getElementById('plot-input');
+        const elStatus = document.getElementById('status');
+        const elBtnSearch = document.getElementById('btn-search');
+        const elBtnClear = document.getElementById('btn-clear');
+
+        // ─── Helpers ──────────────────────────────────────────────
+        async function nominatimSearch(q) {
+            const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=in`;
+            const resp = await fetch(url, { headers: { "User-Agent": "UPCadastralMap/1.0" } });
+            const data = await resp.json();
+            return data && data.length ? data[0] : null;
+        }
+
+        function getVillageName(f) {
+            return String(f.get('village') || f.get('VILLAGE') || f.get('villagename') || '');
+        }
+        function getPlotNo(f) {
+            return String(f.get('khasra') || f.get('plot_no') || f.get('plotno') || f.get('KHASRA') || '');
+        }
+        function getDistrictName(f) {
+            return String(f.get('district') || f.get('DISTRICT') || '');
+        }
+
+        function scanTiles(extent, villageName, plotNo) {
+            if (typeof cadastralSource.getFeaturesInExtent !== 'function') {
+                return { villageFeatures: [], plotFeatures: [], error: 'Tile scanning not supported by this OpenLayers version.' };
+            }
+            const all = cadastralSource.getFeaturesInExtent(extent) || [];
+            const vNorm = (villageName || '').trim().toLowerCase();
+            const pNorm = (plotNo || '').trim().toLowerCase();
+
+            const villageFeatures = all.filter(f => getVillageName(f).toLowerCase() === vNorm);
+            const plotFeatures = villageFeatures.filter(f => getPlotNo(f).toLowerCase() === pNorm);
+
+            return { villageFeatures, plotFeatures, totalLoaded: all.length };
+        }
+
+        function computeExtent(features) {
+            const ext = ol.extent.createEmpty();
+            features.forEach(f => {
+                const geom = f.getGeometry();
+                if (geom) ol.extent.extend(ext, geom.getExtent());
+            });
+            return ext;
+        }
+
+        function zoomToExtent(ext, opts = {}) {
+            map.getView().fit(ext, {
+                padding: opts.padding || [60, 60, 60, 60],
+                duration: opts.duration || 800
+            });
+        }
+
+        function highlightFeatures(features) {
+            highlightSource.clear();
+            features.forEach(f => {
+                const clone = f.clone();
+                highlightSource.addFeature(clone);
+            });
+        }
+
+        // ─── Main search ──────────────────────────────────────────
+        async function searchLocation() {
+            const district = elDistrict.value.trim();
+            const tehsil = elTehsil.value.trim();
+            const village = elVillage.value.trim();
+            const plot = elPlot.value.trim();
+            highlightSource.clear();
+
+            if (!district && !tehsil && !village) {
+                elStatus.textContent = "Please enter at least District or Village.";
+                return;
+            }
+
+            // Step 1: Geocode district via Nominatim
+            elStatus.textContent = "Step 1/3: Geocoding district via OpenStreetMap...";
+            const nResult = await nominatimSearch(`${district || 'Uttar Pradesh'}, India`);
+
+            if (!nResult) {
+                elStatus.innerHTML = `<span style="color:#c53030">District not found in map database.</span> Try a different spelling.`;
+                return;
+            }
+
+            const lon = parseFloat(nResult.lon);
+            const lat = parseFloat(nResult.lat);
+
+            // Step 2: Zoom to district and wait for tiles
+            map.getView().animate({
+                center: ol.proj.fromLonLat([lon, lat]),
+                zoom: 12,
+                duration: 800
+            });
+
+            elStatus.textContent = `Step 2/3: Zoomed to ${nResult.display_name.split(',')[0]}. Loading cadastral tiles...`;
+
+            setTimeout(() => {
+                const viewport = map.getView().calculateExtent();
+                const scan = scanTiles(viewport, village, plot);
+
+                if (scan.error) {
+                    elStatus.innerHTML = `<span style="color:#c53030">${scan.error}</span>`;
+                    return;
+                }
+
+                if (!village) {
+                    elStatus.innerHTML = `Showing <strong>${district}</strong> area. <br>Click any plot to inspect. <br><span style="color:#718096">(${scan.totalLoaded.toLocaleString()} parcels loaded)</span>`;
+                    return;
+                }
+
+                if (!scan.villageFeatures.length) {
+                    elStatus.innerHTML = `<span style="color:#c53030">Village "${village}" not found in loaded tiles.</span><br>It may be outside the scanned district area or data is incomplete.<br>Try zooming/panning manually.`;
+                    return;
+                }
+
+                // Village found — compute its extent and zoom in
+                const villageExt = computeExtent(scan.villageFeatures);
+                if (!ol.extent.isEmpty(villageExt)) {
+                    zoomToExtent(villageExt, { padding: [80, 80, 80, 80] });
+                }
+
+                // Step 3: After zooming to village, wait and scan for plot
+                elStatus.innerHTML = `Found <strong>${village}</strong> (${scan.villageFeatures.length} parcels). Scanning for Plot ${plot || '—'}...`;
+
+                if (plot) {
+                    setTimeout(() => {
+                        const viewport2 = map.getView().calculateExtent();
+                        const scan2 = scanTiles(viewport2, village, plot);
+
+                        if (scan2.plotFeatures.length) {
+                            const plotExt = computeExtent(scan2.plotFeatures);
+                            if (!ol.extent.isEmpty(plotExt)) {
+                                zoomToExtent(plotExt, { padding: [120, 120, 120, 120] });
+                                highlightFeatures(scan2.plotFeatures);
+                            }
+                            elStatus.innerHTML = `Found <strong>${village}</strong> — Plot <strong>${plot}</strong> highlighted.<br><span style="color:#718096">(${scan2.plotFeatures.length} matching parcels)</span>`;
+                        } else {
+                            highlightFeatures(scan2.villageFeatures);
+                            elStatus.innerHTML = `Found <strong>${village}</strong>. Plot "${plot}" not found in this village.<br>Red outlines show the full village. Click parcels to inspect numbers.`;
+                        }
+                    }, 1800);
+                } else {
+                    highlightFeatures(scan.villageFeatures);
+                    elStatus.innerHTML = `Found <strong>${village}</strong>. Village boundary highlighted in red.<br>Click any plot to inspect its Khasra number.`;
+                }
+            }, 1500);
+        }
+
+        elBtnSearch.addEventListener('click', searchLocation);
+        [elDistrict, elTehsil, elVillage, elPlot].forEach(el => {
+            el.addEventListener('keydown', (e) => { if (e.key === 'Enter') searchLocation(); });
+        });
+
+        elBtnClear.addEventListener('click', () => {
+            highlightSource.clear();
+            elDistrict.value = '';
+            elTehsil.value = '';
+            elVillage.value = '';
+            elPlot.value = '';
+            elStatus.textContent = '';
+            map.getView().animate({
+                center: ol.proj.fromLonLat([80.9462, 26.8467]),
+                zoom: 10,
+                duration: 600
+            });
+        });
+
+        // Click info
+        const clickInfo = document.getElementById('click-info');
+        map.on('click', function (evt) {
+            const features = map.getFeaturesAtPixel(evt.pixel);
+            if (features && features.length > 0) {
+                const props = features[0].getProperties();
+                delete props.geometry;
+                clickInfo.innerHTML = '<strong>Plot Info:</strong><br><pre style="margin:4px 0;">' +
+                    JSON.stringify(props, null, 2) + '</pre>';
+                clickInfo.style.display = 'block';
+            } else {
+                clickInfo.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>
